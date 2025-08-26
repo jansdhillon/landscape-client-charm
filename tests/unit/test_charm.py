@@ -145,15 +145,14 @@ class TestCharm(unittest.TestCase):
         self.harness.begin()
 
         data = b"hello"
-
-        data_b64 = "base64:" + base64.b64encode(data).decode()
-        self.harness.update_config({"ssl-public-key": data_b64})
+        data_b64 = base64.b64encode(data).decode()  # no 'base64:' prefix
+        self.harness.update_config({"ssl-ca": data_b64})
 
         self.open_mock().write.assert_called_once_with(data)
 
     def test_ssl_cert_invalid_file(self):
         self.harness.begin()
-        self.harness.update_config({"ssl-public-key": "/path/to/nowhere"})
+        self.harness.update_config({"ssl-ca": "/path/to/nowhere"})
         status = self.harness.charm.unit.status
         self.assertEqual(status.message, "Certificate does not exist!")
         self.assertIsInstance(status, BlockedStatus)
