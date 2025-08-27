@@ -150,12 +150,29 @@ class TestCharm(unittest.TestCase):
 
         self.open_mock().write.assert_called_once_with(data)
 
-    def test_ssl_cert_invalid_file(self):
+    @mock.patch("charm.os.path.isfile", return_value=True)
+    @mock.patch("charm.merge_client_config")
+    def test_ssl_cert_valid_path(self, merge_client_config_mock, _):
         self.harness.begin()
-        self.harness.update_config({"ssl-ca": "/path/to/nowhere"})
-        status = self.harness.charm.unit.status
-        self.assertEqual(status.message, "Certificate does not exist!")
-        self.assertIsInstance(status, BlockedStatus)
+        self.harness.update_config(
+            {"ssl-ca": "/etc/ssl/certs/landscape_server_cal.crt"}
+        )
+        self.assertEqual(
+            "/etc/ssl/certs/landscape_server_cal.crt",
+            merge_client_config_mock.call_args.args[1]["ssl_ca"],
+        )
+
+    @mock.patch("charm.os.path.isfile", return_value=False)
+    @mock.patch("charm.merge_client_config")
+    @mock.patch("charm.write_certificate", side_effect=OSError("write failed"))
+    def test_ssl_cert_oserror(
+        self, _write_certificate, merge_client_config_mock, _isfile
+    ):
+        self.harness.begin()
+        self.harness.update_config({"ssl-ca": "badcert"})
+        merge_client_config_mock.assert_not_called()
+        self.assertIsInstance(self.harness.model.unit.status, BlockedStatus)
+        self.assertIn("Certificate does not exist", str(self.harness.model.unit.status))
 
     def test_relation_broken(self):
         self.harness.begin()
