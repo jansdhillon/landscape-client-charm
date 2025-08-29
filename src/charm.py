@@ -201,7 +201,9 @@ def create_client_config(
 
     if ssl_key := client_config.get("ssl_ca"):
         client_config["ssl_ca"] = parse_ssl_arg(ssl_key)
-
+    elif ssl_key := client_config.get("ssl_public_key"):
+        client_config["ssl_public_key"] = parse_ssl_arg(ssl_key)
+        logging.warning("`ssl_public_key` is deprecated; " "use `ssl_ca` instead.")
     return client_config
 
 

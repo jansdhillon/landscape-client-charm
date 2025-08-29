@@ -139,6 +139,18 @@ class TestCharm(unittest.TestCase):
         self.assertNotIn("ppa", merge_client_config_mock.call_args.args[1])
 
     @mock.patch("charm.merge_client_config")
+    def test_ssl_public_key(self, merge_client_config_mock):
+        """Test that the base64 encoded ssl cert gets written successfully"""
+
+        self.harness.begin()
+
+        data = b"hello"
+        data_b64 = base64.b64encode(data).decode()  # no 'base64:' prefix
+        self.harness.update_config({"ssl-public-key": data_b64})
+
+        self.open_mock().write.assert_called_once_with(data)
+
+    @mock.patch("charm.merge_client_config")
     def test_ssl_cert(self, merge_client_config_mock):
         """Test that the base64 encoded ssl cert gets written successfully"""
 
