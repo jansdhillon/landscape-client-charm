@@ -12,14 +12,13 @@ import socket
 import subprocess
 import sys
 import traceback
+from typing import Any, Mapping
 
+from charms.operator_libs_linux.v0 import apt
 from ops.charm import CharmBase
 from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus, MaintenanceStatus, BlockedStatus
-
-from charms.operator_libs_linux.v0 import apt
-
+from ops.model import ActiveStatus, BlockedStatus, MaintenanceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +28,15 @@ CLIENT_CONF_FILE = "/etc/landscape/client.conf"
 CLIENT_CONFIG_CMD = "/usr/bin/landscape-config"
 CLIENT_PACKAGE = "landscape-client"
 
-# These configs are not part of landscape client so we don't pass them to it
-CHARM_ONLY_CONFIGS = [
+CHARM_ONLY_CONFIGS = {
     "ppa",
     "disable-unattended-upgrades",
-]
+    "additional-client-configuration",
+}
+"""
+Configuration values that are only meaningful for the charm and should not be passed
+through to Landscape client.
+"""
 
 
 class ClientCharmError(Exception):
@@ -67,19 +70,17 @@ def write_certificate(certificate, filename):
 
 def parse_ssl_arg(value):
     """
-    If ssl config starts with 'base64' or is too long to be a file, decode
-    and write it to the default cert path, return the default path. Else
-    make sure the file exists and return the original value
+    Check for file, return if exists.
+    Otherwise decode from base64 and write to_location
     """
-    b64_prefix = "base64:"
-    if value.startswith(b64_prefix) or len(value) > 4096:
-        value = re.sub("^" + b64_prefix, "", value)
+    if os.path.isfile(value):
+        return value
+    try:
         write_certificate(value, CERT_FILE)
         value = CERT_FILE
-    else:
-        if not os.path.isfile(value):
-            log_error("Cert {} does not exist!".format(value))
-            raise ClientCharmError("Certificate does not exist!")
+    except OSError:
+        log_error("Cert {} does not exist!".format(value))
+        raise ClientCharmError("Certificate does not exist!")
 
     return value
 
@@ -123,16 +124,87 @@ def process_helper(args, hide_errors=False, env=get_modified_env_vars()):
         return True
 
 
-def update_config(table):
-    """Adds the config values in table to the client.conf file"""
+def merge_client_config(conf_file: str, client_config: Mapping[str, Any]):
+    """
+    Read the contents of the [client] section in `conf_file` and merge `client_config`,
+    overwriting existing values.
+    """
     config = configparser.ConfigParser()
-    config.read(CLIENT_CONF_FILE)
-    for key, value in table.items():
-        key = key.replace("-", "_")
-        if value:
-            config["client"][key] = str(value)
-    with open(CLIENT_CONF_FILE, "w") as configfile:
+    config.read(conf_file)
+
+    config["client"].update({k: str(v) for k, v in client_config.items() if v})
+
+    with open(conf_file, "w") as configfile:
         config.write(configfile)
+
+    c = {s: dict(config[s]) for s in config.sections()}
+    logger.info(f"Client configuration merged. Current value: {c}")
+
+
+def get_additional_client_configuration(
+    juju_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    Parse the `additional-client-configuration` option from the Juju configuration
+    and return key-value pairs.
+
+    Return an empty dictionary if the `additional-client-configuration` option is not
+    provided or cannot be parsed.
+    """
+    raw = juju_config.get("additional-client-configuration")
+    logger.debug(f"Received additional-client-configuration: {repr(raw)}")
+    if not raw:
+        return {}
+
+    config = configparser.ConfigParser()
+
+    try:
+        config.read_string(raw)
+    except configparser.MissingSectionHeaderError as e:
+        raise ClientCharmError(
+            f"Malformed additional-client-configuration: {repr(raw)}"
+        ) from e
+
+    try:
+        client_config = dict(config["client"])
+        logger.debug(f"Parsed additional-client-configuration: {client_config}")
+        return client_config
+    except KeyError as e:
+        raise ClientCharmError(
+            f"Malformed additional-client-configuration: {repr(raw)}"
+        ) from e
+
+
+def create_client_config(
+    juju_config: Mapping[str, Any],
+    default_computer_title: str,
+) -> dict:
+    """
+    Create the Landscape client configuration from the Juju configuration.
+
+    Remove any Juju configuration that is not relevant to client, and set
+    default values if applicable.
+
+    Juju config values with multiple words are hyphen-separated, but client
+    values are underscore-separated.
+    """
+    client_config = {
+        key.replace("-", "_"): value
+        for key, value in juju_config.items()
+        if key not in CHARM_ONLY_CONFIGS
+    }
+
+    additional_configuration = get_additional_client_configuration(juju_config)
+    client_config.update(additional_configuration)
+
+    client_config.setdefault("computer_title", default_computer_title)
+
+    if ssl_key := client_config.get("ssl_ca"):
+        client_config["ssl_ca"] = parse_ssl_arg(ssl_key)
+    elif ssl_key := client_config.get("ssl_public_key"):
+        client_config["ssl_public_key"] = parse_ssl_arg(ssl_key)
+        logging.warning("`ssl_public_key` is deprecated; " "use `ssl_ca` instead.")
+    return client_config
 
 
 class LandscapeClientCharm(CharmBase):
@@ -167,11 +239,13 @@ class LandscapeClientCharm(CharmBase):
                 # if the charm has a proxy setting configured, override the
                 # juju_http(s)_proxy configuration from the model
                 if proxy_var.replace("_", "-") in self.config:
-                    add_apt_repository_env[proxy_var] = \
-                        self.config[proxy_var.replace("_", "-")]
+                    add_apt_repository_env[proxy_var] = self.config[
+                        proxy_var.replace("_", "-")
+                    ]
                 elif juju_proxy_var in add_apt_repository_env:
-                    add_apt_repository_env[proxy_var] = \
-                        add_apt_repository_env[juju_proxy_var]
+                    add_apt_repository_env[proxy_var] = add_apt_repository_env[
+                        juju_proxy_var
+                    ]
 
                 if proxy_var in add_apt_repository_env:
                     logger.info(
@@ -179,8 +253,9 @@ class LandscapeClientCharm(CharmBase):
                         f"{add_apt_repository_env[proxy_var]}"
                     )
 
-            if not process_helper(["add-apt-repository", "-y", landscape_ppa],
-                                  env=add_apt_repository_env):
+            if not process_helper(
+                ["add-apt-repository", "-y", landscape_ppa], env=add_apt_repository_env
+            ):
                 raise ClientCharmError("Failed to add PPA!")
 
     def install_landscape_client(self):
@@ -191,23 +266,17 @@ class LandscapeClientCharm(CharmBase):
             log_error(traceback.format_exc())
             raise ClientCharmError("Failed to install client!")
 
-    def parse_client_config_args(self):
+    def set_client_config(self):
         """
         Gets and processes the landscape client config args
         from the charm configuration
         """
-        config_dict = {
-            key: value
-            for key, value in self.config.items()
-            if key not in CHARM_ONLY_CONFIGS
-        }
-        if not config_dict.get("computer-title"):
-            config_dict["computer-title"] = socket.gethostname()
-        ssl_key = config_dict.get("ssl-public-key")
-        if ssl_key:
-            config_dict["ssl-public-key"] = parse_ssl_arg(ssl_key)
-        log_info(config_dict)
-        update_config(config_dict)
+        client_config = create_client_config(
+            juju_config=self.config,
+            default_computer_title=socket.gethostname(),
+        )
+        log_info(client_config)
+        merge_client_config(CLIENT_CONF_FILE, client_config)
 
     def is_registered(self):
         return process_helper([CLIENT_CONFIG_CMD, "--is-registered"], hide_errors=True)
@@ -220,7 +289,7 @@ class LandscapeClientCharm(CharmBase):
 
     def run_landscape_client(self):
         self.unit.status = MaintenanceStatus("Configuring landscape client..")
-        self.parse_client_config_args()
+        self.set_client_config()
         if self.is_registered():
             process_helper(["systemctl", "restart", "landscape-client"])
             self.unit.status = ActiveStatus("Client config updated!")

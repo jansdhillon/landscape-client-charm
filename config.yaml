@@ -40,12 +40,17 @@ options:
       Normally http://fqdn/ping.
     type: string
     default:
-  ssl-public-key:
+  ssl-ca:
     description: |
       The CA certificate to verify the server certificate with. This can be
       a path to a file, or a base64 encoded entry of the certificate itself,
       prefixed with "base64:". This config is only used if the message server
       URL given above starts with https.
+    type: string
+    default:
+  ssl-public-key:
+    description: |
+      DEPRECATED: Use ssl-ca instead. Will be removed in 26.04 release
     type: string
     default:
   account-name:
@@ -111,3 +116,9 @@ options:
       regardless of the setting created by the unattended-upgrades package.
     type: boolean
     default: false
+  additional-client-configuration:
+    description: |
+      The contents of a client.conf file to be merged into the other configuration.
+      Values included here take priority over their equivalent configuration options.
+    type: string
+    default:
